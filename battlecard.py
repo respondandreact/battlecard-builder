@@ -1,128 +1,176 @@
 #!/usr/bin/env python3
-"""Build a competitive battlecard from raw competitor notes using the Anthropic API.
+"""
+battlecard.py — turn raw competitor notes into a sales battlecard.
 
-Reads a plaintext file of raw competitor notes, sends it to Claude with the
-system prompt stored in prompts/battlecard.md, and writes the generated
-battlecard to a Markdown file.
+Provider-swappable: runs on the Anthropic API (default) or on Ollama Cloud's
+free OpenAI-compatible endpoint. The system prompt and CLI behavior are
+identical across providers; only the model call differs.
 
 Usage:
-    export ANTHROPIC_API_KEY=sk-ant-...
-    python battlecard.py notes.txt
-    python battlecard.py notes.txt -o acme-battlecard.md
-"""
+    export ANTHROPIC_API_KEY=sk-ant-...        # for the default provider
+    python battlecard.py notes.txt             # -> notes-battlecard.md
 
-from __future__ import annotations
+    export OLLAMA_API_KEY=...                   # for the free Ollama path
+    LLM_PROVIDER=ollama python battlecard.py notes.txt
+    python battlecard.py notes.txt --provider ollama --model gpt-oss:120b-cloud
+"""
 
 import argparse
 import os
 import sys
 from pathlib import Path
 
-import anthropic
+# --- Defaults -----------------------------------------------------------------
+DEFAULT_PROMPT_PATH = "prompts/battlecard.md"
 
-API_KEY_ENV = "ANTHROPIC_API_KEY"
-DEFAULT_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "battlecard.md"
-DEFAULT_MODEL = "claude-opus-4-8"
-DEFAULT_MAX_TOKENS = 16000
+# Sensible per-provider model defaults. Anthropic defaults to Sonnet (not Opus)
+# on purpose: this tool gets run repeatedly, and on battlecard synthesis Sonnet's
+# output is hard to distinguish from Opus while being cheaper and faster. Bump to
+# claude-opus-4-8 with --model if you ever find the quality gap matters.
+DEFAULT_MODELS = {
+    "anthropic": "claude-sonnet-4-6",
+    "ollama": "gpt-oss:120b-cloud",  # verify availability with `ollama ls`
+}
+
+# Ollama Cloud's OpenAI-compatible base URL. Note: it is /v1, NOT /api/v1.
+OLLAMA_BASE_URL = "https://ollama.com/v1"
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def fail(msg: str) -> "None":
+    """Print a clean error and exit non-zero (no stack trace for user errors)."""
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+# --- Provider implementations -------------------------------------------------
+# Each returns the battlecard text as a string. SDKs are imported lazily so you
+# only need the SDK for the provider you actually use.
+
+def generate_anthropic(system_prompt: str, notes: str, model: str) -> str:
+    try:
+        import anthropic
+    except ImportError:
+        fail("the 'anthropic' package is not installed. Run: pip install anthropic")
+
+    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+    chunks = []
+    try:
+        # Streaming is the recommended pattern for variable-length output; it
+        # also avoids HTTP read timeouts on longer battlecards.
+        with client.messages.stream(
+            model=model,
+            max_tokens=4000,
+            system=system_prompt,
+            messages=[{"role": "user", "content": notes}],
+        ) as stream:
+            for text in stream.text_stream:
+                chunks.append(text)
+    except anthropic.APIError as e:
+        fail(f"Anthropic request failed: {e}")
+    return "".join(chunks)
+
+
+def generate_ollama(system_prompt: str, notes: str, model: str) -> str:
+    try:
+        from openai import OpenAI
+    except ImportError:
+        fail("the 'openai' package is not installed. Run: pip install openai")
+
+    # Ollama Cloud speaks the OpenAI protocol, so we reuse the OpenAI SDK and
+    # just repoint the base_url. The API key comes from OLLAMA_API_KEY.
+    client = OpenAI(
+        base_url=OLLAMA_BASE_URL,
+        api_key=os.environ["OLLAMA_API_KEY"],
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": notes},
+            ],
+        )
+    except Exception as e:  # noqa: BLE001 - we want a friendly message either way
+        # The free tier is rate limited (per-model, undocumented). Surface 429s
+        # clearly rather than dumping a traceback.
+        if "429" in str(e) or "rate" in str(e).lower():
+            fail(
+                "Ollama Cloud rate limit hit (429). Wait ~30s and retry, "
+                "or try a different model with --model."
+            )
+        fail(f"Ollama request failed: {e}")
+    return resp.choices[0].message.content or ""
+
+
+PROVIDERS = {
+    "anthropic": (generate_anthropic, "ANTHROPIC_API_KEY"),
+    "ollama": (generate_ollama, "OLLAMA_API_KEY"),
+}
+
+
+# --- CLI ----------------------------------------------------------------------
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate a competitive battlecard from raw competitor notes.",
+        description="Turn raw competitor notes into a sales battlecard."
+    )
+    parser.add_argument("notes", help="Path to a text file of raw competitor notes.")
+    parser.add_argument(
+        "-o", "--output",
+        help="Output path (default: <notes>-battlecard.md).",
     )
     parser.add_argument(
-        "notes",
-        type=Path,
-        help="Path to a text file of raw competitor notes.",
+        "--provider",
+        choices=sorted(PROVIDERS),
+        help="LLM provider. Overrides the LLM_PROVIDER env var. Default: anthropic.",
     )
     parser.add_argument(
-        "-o",
-        "--output",
-        type=Path,
-        help="Path for the generated Markdown battlecard "
-        "(default: <notes>-battlecard.md).",
+        "--model",
+        help="Model to use. Defaults to a sensible model for the chosen provider.",
     )
     parser.add_argument(
-        "-p",
         "--prompt",
-        type=Path,
         default=DEFAULT_PROMPT_PATH,
         help=f"Path to the system prompt (default: {DEFAULT_PROMPT_PATH}).",
     )
-    parser.add_argument(
-        "-m",
-        "--model",
-        default=DEFAULT_MODEL,
-        help=f"Claude model to use (default: {DEFAULT_MODEL}).",
-    )
-    parser.add_argument(
-        "--max-tokens",
-        type=int,
-        default=DEFAULT_MAX_TOKENS,
-        help=f"Maximum output tokens (default: {DEFAULT_MAX_TOKENS}).",
-    )
-    return parser.parse_args(argv)
+    args = parser.parse_args()
 
+    # Resolve provider: --provider > LLM_PROVIDER env > "anthropic".
+    provider = args.provider or os.environ.get("LLM_PROVIDER", "anthropic")
+    if provider not in PROVIDERS:
+        fail(f"unknown provider '{provider}'. Choose one of: {', '.join(sorted(PROVIDERS))}")
+    generate, key_env = PROVIDERS[provider]
 
-def read_text(path: Path, label: str) -> str:
-    """Read a UTF-8 text file, exiting with a friendly message on failure."""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        sys.exit(f"error: {label} not found: {path}")
-    except OSError as exc:
-        sys.exit(f"error: could not read {label} ({path}): {exc}")
-    if not text.strip():
-        sys.exit(f"error: {label} is empty: {path}")
-    return text
+    # Validate inputs up front so failures are fast and obvious.
+    if not os.environ.get(key_env):
+        fail(f"{key_env} is not set (required for provider '{provider}').")
 
+    notes_path = Path(args.notes)
+    if not notes_path.is_file():
+        fail(f"notes file not found: {notes_path}")
+    notes = notes_path.read_text(encoding="utf-8").strip()
+    if not notes:
+        fail(f"notes file is empty: {notes_path}")
 
-def generate_battlecard(
-    notes: str, system_prompt: str, model: str, max_tokens: int
-) -> str:
-    """Send the notes to Claude and return the generated battlecard text."""
-    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
-    with client.messages.stream(
-        model=model,
-        max_tokens=max_tokens,
-        system=system_prompt,
-        thinking={"type": "adaptive"},
-        messages=[{"role": "user", "content": notes}],
-    ) as stream:
-        message = stream.get_final_message()
-    return "".join(block.text for block in message.content if block.type == "text")
+    prompt_path = Path(args.prompt)
+    if not prompt_path.is_file():
+        fail(f"system prompt not found: {prompt_path}")
+    system_prompt = prompt_path.read_text(encoding="utf-8").strip()
+    if not system_prompt:
+        fail(f"system prompt is empty: {prompt_path}")
 
-
-def main(argv: list[str] | None = None) -> None:
-    args = parse_args(argv)
-
-    if not os.environ.get(API_KEY_ENV):
-        sys.exit(f"error: {API_KEY_ENV} environment variable is not set.")
-
-    notes = read_text(args.notes, "competitor notes")
-    system_prompt = read_text(args.prompt, "system prompt")
-
-    output_path = args.output or args.notes.with_name(
-        f"{args.notes.stem}-battlecard.md"
+    model = args.model or DEFAULT_MODELS[provider]
+    out_path = Path(args.output) if args.output else notes_path.with_name(
+        f"{notes_path.stem}-battlecard.md"
     )
 
-    try:
-        battlecard = generate_battlecard(
-            notes, system_prompt, args.model, args.max_tokens
-        )
-    except anthropic.APIError as exc:
-        sys.exit(f"error: Anthropic API request failed: {exc}")
+    print(f"[{provider}] generating battlecard with {model}...", file=sys.stderr)
+    battlecard = generate(system_prompt, notes, model).strip()
+    if not battlecard:
+        fail("model returned an empty response; nothing written.")
 
-    if not battlecard.strip():
-        sys.exit("error: the model returned an empty battlecard.")
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        output_path.write_text(battlecard, encoding="utf-8")
-    except OSError as exc:
-        sys.exit(f"error: could not write output ({output_path}): {exc}")
-
-    print(f"Wrote battlecard to {output_path}")
+    # Only write on success — no partial files on error.
+    out_path.write_text(battlecard + "\n", encoding="utf-8")
+    print(out_path)
 
 
 if __name__ == "__main__":
