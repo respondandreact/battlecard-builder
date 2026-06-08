@@ -1,0 +1,20 @@
+ABOUT US: NorthBeacon — we sell a real-time fraud and risk decisioning platform to banks and credit unions (mid-market, $1B-$50B in assets). We position on two things: fastest deployment in the category, and ML-native accuracy over legacy rules engines.
+- Average production deployment: 4 weeks (signed contract to live), measured across last 40 implementations
+- Certifications: SOC 2 Type II, PCI DSS Level 1, FedRAMP Ready
+- 215 financial-institution customers; net revenue retention 122%
+- Proof point: Cedar Valley Credit Union cut fraud losses 32% and reduced false-positive declines 41% in the first 6 months
+- Pricing: transparent per-decision pricing, no implementation fees, no mandatory professional-services contract; published rate card
+- ML-native: models retrain weekly on customer data; analysts can adjust thresholds without vendor involvement
+- Stable leadership: founding CEO and CTO still in seat after 7 years; Series C, well capitalized
+- Support: median first response under 2 hours, named customer success manager per account
+
+COMPETITOR NOTES: Apex RiskShield
+- Positioning: the incumbent enterprise standard; markets itself as "trusted by 8 of the top 10 US banks"
+- Genuine strengths: deep enterprise relationships, very broad pre-built integrations (200+ core banking systems), strong brand recognition, mature compliance/audit tooling that large banks like
+- Big-logo credibility we can't match at the top end of the market
+- Weakness — deployment: implementations routinely take 4-6 months; one prospect told us 9 months including their core integration
+- Weakness — pricing: high upfront perpetual license plus mandatory professional-services package; "trap pricing" reputation — headline number looks fine, then $200K-$500K in required services and annual "tuning" fees appear
+- Weakness — tech: legacy rules-based engine, not ML-native; model changes require a paid services engagement, can take weeks
+- Weakness — high total cost of ownership; analysts report being locked out of making their own threshold changes
+- Recent signals: growth has stalled, missed two flagship bank deals in the last year (lost one to us at a regional bank), round of layoffs reported, Chief Product Officer and VP Eng both departed in the last 8 months
+- Support reviews trending negative on G2 — slow response, offshore tier-1
